@@ -1,0 +1,472 @@
+---
+name: optimize-rpc-multicall
+description: Identifies inefficient sequential RPC calls using publicClient.readContract and refactors them to use viem's multicall for better performance, reduced RPC requests, and consistent state snapshots.
+allowed-tools:
+  - Glob
+  - Grep
+  - Read
+  - Edit
+  - Write
+  - Bash
+  - TodoWrite
+  - AskUserQuestion
+user-invocable: true
+---
+
+# Optimize RPC Calls with Multicall
+
+This skill helps you find and optimize inefficient sequential RPC calls in your codebase by converting them to use viem's `multicall` feature. This reduces multiple RPC requests to a single batched call, improving performance and ensuring state consistency across reads.
+
+## What This Skill Does
+
+1. Scans your codebase for patterns of multiple sequential `publicClient.readContract` calls
+2. Identifies opportunities where calls can be batched together
+3. Refactors code to use `publicClient.multicall` instead
+4. Handles error cases appropriately with `allowFailure` parameter
+5. Provides before/after comparisons and performance impact estimates
+
+## When to Use This Skill
+
+Use this skill when:
+- You have multiple sequential contract read operations
+- You're making repeated `readContract` calls in loops or Promise.all()
+- You want to reduce RPC provider costs and latency
+- You need consistent state snapshots across multiple reads
+- You're optimizing application performance
+
+## Step-by-Step Process
+
+### Step 1: Scan for Sequential RPC Calls
+
+Search the codebase for patterns indicating multiple RPC calls:
+
+```bash
+# Look for readContract usage
+Grep: pattern="publicClient\.readContract"
+Grep: pattern="await.*readContract.*await.*readContract" (multiline: true)
+Grep: pattern="Promise\.all.*readContract"
+```
+
+Focus on files with:
+- Multiple `await publicClient.readContract()` calls in sequence
+- `Promise.all()` wrapping multiple `readContract` operations
+- Loops calling `readContract` repeatedly
+- Functions making multiple contract reads
+
+### Step 2: Analyze Each Instance
+
+For each file found, read it completely and identify:
+- Are the calls independent or do they depend on each other?
+- Can they all use the same block number for consistency?
+- Are they reading from the same or different contracts?
+- How are errors currently being handled?
+
+**Only batch calls that:**
+- Are independent (later calls don't depend on earlier results)
+- Can reasonably execute in the same block context
+- Would benefit from a single RPC request
+
+### Step 3: Create a Todo List
+
+Use the TodoWrite tool to track all instances found:
+
+```
+- Optimize RPC calls in src/utils/baultData.ts (3 sequential readContract calls)
+- Optimize RPC calls in src/bot/compoundoor.ts (Promise.all with 5 readContract calls)
+- [etc.]
+```
+
+### Step 4: Refactor to Multicall
+
+For each instance, refactor following this pattern:
+
+**Before:**
+```typescript
+const totalSupply = await publicClient.readContract({
+  address: contractAddress,
+  abi: tokenAbi,
+  functionName: 'totalSupply'
+});
+
+const balance = await publicClient.readContract({
+  address: contractAddress,
+  abi: tokenAbi,
+  functionName: 'balanceOf',
+  args: [userAddress]
+});
+
+const allowance = await publicClient.readContract({
+  address: contractAddress,
+  abi: tokenAbi,
+  functionName: 'allowance',
+  args: [ownerAddress, spenderAddress]
+});
+```
+
+**After:**
+```typescript
+const results = await publicClient.multicall({
+  contracts: [
+    {
+      address: contractAddress,
+      abi: tokenAbi,
+      functionName: 'totalSupply'
+    },
+    {
+      address: contractAddress,
+      abi: tokenAbi,
+      functionName: 'balanceOf',
+      args: [userAddress]
+    },
+    {
+      address: contractAddress,
+      abi: tokenAbi,
+      functionName: 'allowance',
+      args: [ownerAddress, spenderAddress]
+    }
+  ],
+  allowFailure: true
+});
+
+// Extract results with proper error handling
+const totalSupply = results[0].status === 'success' ? results[0].result : null;
+const balance = results[1].status === 'success' ? results[1].result : null;
+const allowance = results[2].status === 'success' ? results[2].result : null;
+
+// Handle failures if needed
+if (results[0].status === 'failure') {
+  console.error('Failed to fetch totalSupply:', results[0].error);
+}
+```
+
+### Step 5: Configure Multicall Parameters
+
+Choose appropriate parameters based on the use case:
+
+**allowFailure Parameter:**
+- `allowFailure: true` (default): Returns results with status, allows partial success
+- `allowFailure: false`: Throws error if any call fails, returns direct results array
+
+Use `allowFailure: true` when:
+- Some contract calls might legitimately fail
+- You want to handle failures gracefully
+- Partial data is acceptable
+
+Use `allowFailure: false` when:
+- All calls must succeed for the operation to be valid
+- You want to fail fast on any error
+- Simpler error handling (no status checking needed)
+
+**Optional Parameters:**
+```typescript
+{
+  contracts: [...],
+  allowFailure: true,
+  blockNumber: 123456n,        // For historical state queries
+  batchSize: 1024,             // Adjust based on RPC provider limits
+  multicallAddress: '0x...'    // Override default multicall3 address
+}
+```
+
+### Step 6: Handle Edge Cases
+
+**Different ABIs:**
+Each contract in the array can have a different ABI:
+```typescript
+contracts: [
+  { address: token1, abi: erc20Abi, functionName: 'balanceOf', args: [user] },
+  { address: nft, abi: erc721Abi, functionName: 'ownerOf', args: [tokenId] },
+  { address: vault, abi: vaultAbi, functionName: 'totalAssets' }
+]
+```
+
+**Loop Refactoring:**
+```typescript
+// Before: Sequential calls in a loop
+const balances = [];
+for (const address of addresses) {
+  const balance = await publicClient.readContract({
+    address: tokenAddress,
+    abi: tokenAbi,
+    functionName: 'balanceOf',
+    args: [address]
+  });
+  balances.push(balance);
+}
+
+// After: Single multicall
+const results = await publicClient.multicall({
+  contracts: addresses.map(address => ({
+    address: tokenAddress,
+    abi: tokenAbi,
+    functionName: 'balanceOf',
+    args: [address]
+  })),
+  allowFailure: true
+});
+
+const balances = results.map(r => r.status === 'success' ? r.result : 0n);
+```
+
+**Promise.all() with readContract:**
+```typescript
+// Before: Parallel execution but still N RPC requests
+const [supply, owner, balance] = await Promise.all([
+  publicClient.readContract({ address, abi, functionName: 'totalSupply' }),
+  publicClient.readContract({ address, abi, functionName: 'owner' }),
+  publicClient.readContract({ address, abi, functionName: 'balanceOf', args: [user] })
+]);
+
+// After: Single RPC request
+const results = await publicClient.multicall({
+  contracts: [
+    { address, abi, functionName: 'totalSupply' },
+    { address, abi, functionName: 'owner' },
+    { address, abi, functionName: 'balanceOf', args: [user] }
+  ],
+  allowFailure: false  // Simpler since all must succeed
+});
+
+const [supply, owner, balance] = results;
+```
+
+### Step 7: Document Changes
+
+For each file modified:
+1. Add a comment explaining the optimization
+2. Note the performance improvement (e.g., "Reduced from 5 RPC calls to 1")
+3. Document any error handling changes
+
+Example:
+```typescript
+// Optimized: Batched 3 contract reads into single multicall (3 RPC → 1 RPC)
+const results = await publicClient.multicall({
+  // ...
+});
+```
+
+### Step 8: Report Summary
+
+After completing all optimizations, provide:
+- Total number of instances optimized
+- Total RPC call reduction (e.g., "Reduced 47 RPC calls to 12 multicalls")
+- Files modified with line numbers
+- Any instances that couldn't be optimized and why
+
+## Important Considerations
+
+### When NOT to Use Multicall
+
+Do not batch calls when:
+- Later calls depend on the results of earlier calls (sequential dependency)
+- Calls need different block contexts (historical vs current state)
+- A single call is already sufficient
+- Calls are in different execution contexts (e.g., different async functions not running together)
+
+### Performance Impact
+
+Estimate and communicate the performance improvement:
+- Each multicall replaces N RPC requests with 1 request
+- Typical RPC latency: 50-200ms per request
+- Example: 5 sequential calls (500ms-1000ms) → 1 multicall (100-200ms)
+- Reduced RPC provider costs (if usage-based billing)
+
+### Testing Recommendations
+
+After optimization:
+1. Verify the code still compiles without TypeScript errors
+2. Check that error handling preserves the original behavior
+3. Test with actual contract calls if possible
+4. Ensure returned data types match expectations
+
+### RPC Provider Limits
+
+Some RPC providers limit calldata size. The default `batchSize: 1024` accounts for this. If you encounter issues:
+- Check provider documentation for limits
+- Adjust `batchSize` parameter
+- Split very large batches into multiple multicalls
+
+## Examples
+
+### Example 1: Simple Sequential Calls
+
+**Before (3 RPC requests):**
+```typescript
+const name = await publicClient.readContract({
+  address: tokenAddress,
+  abi: erc20Abi,
+  functionName: 'name'
+});
+
+const symbol = await publicClient.readContract({
+  address: tokenAddress,
+  abi: erc20Abi,
+  functionName: 'symbol'
+});
+
+const decimals = await publicClient.readContract({
+  address: tokenAddress,
+  abi: erc20Abi,
+  functionName: 'decimals'
+});
+```
+
+**After (1 RPC request):**
+```typescript
+const [name, symbol, decimals] = await publicClient.multicall({
+  contracts: [
+    { address: tokenAddress, abi: erc20Abi, functionName: 'name' },
+    { address: tokenAddress, abi: erc20Abi, functionName: 'symbol' },
+    { address: tokenAddress, abi: erc20Abi, functionName: 'decimals' }
+  ],
+  allowFailure: false
+});
+```
+
+### Example 2: Multiple Contracts with Error Handling
+
+**Before (5 RPC requests):**
+```typescript
+const tokenData = await Promise.all([
+  publicClient.readContract({ address: token1, abi, functionName: 'balanceOf', args: [user] }),
+  publicClient.readContract({ address: token2, abi, functionName: 'balanceOf', args: [user] }),
+  publicClient.readContract({ address: token3, abi, functionName: 'balanceOf', args: [user] }),
+  publicClient.readContract({ address: vault, abi: vaultAbi, functionName: 'totalAssets' }),
+  publicClient.readContract({ address: vault, abi: vaultAbi, functionName: 'totalSupply' })
+]);
+```
+
+**After (1 RPC request with error handling):**
+```typescript
+const results = await publicClient.multicall({
+  contracts: [
+    { address: token1, abi, functionName: 'balanceOf', args: [user] },
+    { address: token2, abi, functionName: 'balanceOf', args: [user] },
+    { address: token3, abi, functionName: 'balanceOf', args: [user] },
+    { address: vault, abi: vaultAbi, functionName: 'totalAssets' },
+    { address: vault, abi: vaultAbi, functionName: 'totalSupply' }
+  ],
+  allowFailure: true
+});
+
+const [token1Balance, token2Balance, token3Balance, vaultAssets, vaultSupply] = results.map(
+  (r, i) => {
+    if (r.status === 'failure') {
+      console.warn(`Call ${i} failed:`, r.error);
+      return 0n; // Default fallback value
+    }
+    return r.result;
+  }
+);
+```
+
+### Example 3: Loop Optimization
+
+**Before (N RPC requests):**
+```typescript
+async function getBaultEarnings(baultAddresses: Address[]) {
+  const earnings = [];
+  for (const baultAddress of baultAddresses) {
+    const earned = await publicClient.readContract({
+      address: baultAddress,
+      abi: baultAbi,
+      functionName: 'earned',
+      args: [rewardsToken]
+    });
+    earnings.push({ baultAddress, earned });
+  }
+  return earnings;
+}
+```
+
+**After (1 RPC request):**
+```typescript
+async function getBaultEarnings(baultAddresses: Address[]) {
+  const results = await publicClient.multicall({
+    contracts: baultAddresses.map(baultAddress => ({
+      address: baultAddress,
+      abi: baultAbi,
+      functionName: 'earned',
+      args: [rewardsToken]
+    })),
+    allowFailure: true
+  });
+
+  return baultAddresses.map((baultAddress, i) => ({
+    baultAddress,
+    earned: results[i].status === 'success' ? results[i].result : 0n
+  }));
+}
+```
+
+## Output Format
+
+Present findings and changes in this format:
+
+```
+## RPC Multicall Optimization Report
+
+### Summary
+- Files scanned: X
+- Optimization opportunities found: Y
+- Files modified: Z
+- Total RPC reduction: A calls → B multicalls (C% reduction)
+
+### Detailed Changes
+
+#### File: src/utils/example.ts
+
+**Lines 45-60**
+- Before: 5 sequential readContract calls
+- After: 1 multicall with allowFailure: true
+- Impact: ~400-800ms latency reduction
+
+[Code diff or summary]
+
+#### File: src/bot/anotherFile.ts
+
+**Lines 120-135**
+- Before: Promise.all with 3 readContract calls
+- After: 1 multicall with allowFailure: false
+- Impact: 3 RPC requests → 1 RPC request
+
+[Code diff or summary]
+
+### Instances Not Optimized
+
+#### File: src/dependent-calls.ts (Lines 78-90)
+Reason: Sequential dependency - second call uses result from first call
+
+### Testing Recommendations
+[Specific tests to run based on changes made]
+
+### Performance Impact
+Estimated total latency improvement: X-Y seconds per execution
+Estimated RPC cost reduction: Z%
+```
+
+## Best Practices
+
+1. **Always preserve original behavior** - Ensure refactored code handles errors the same way
+2. **Use appropriate allowFailure setting** - Default to `true` for graceful degradation
+3. **Add clear comments** - Document the optimization and RPC reduction
+4. **Batch reasonably** - Don't create massive multicalls that hit provider limits
+5. **Test thoroughly** - Verify types, error handling, and actual execution
+6. **Consider block consistency** - Use `blockNumber` parameter when needed
+7. **Report comprehensively** - Show before/after comparisons and impact
+
+## Additional Resources
+
+- [Viem Multicall Documentation](https://v1.viem.sh/docs/contract/multicall.html)
+- Multicall3 Contract: Standard across most EVM chains
+- RPC Provider Docs: Check your provider's calldata limits
+
+## Success Criteria
+
+The optimization is successful when:
+- All tests pass (if existing tests are present)
+- Code compiles without errors
+- Error handling behavior is preserved
+- RPC call count is measurably reduced
+- Performance improvement is documented
+- Code readability is maintained or improved
